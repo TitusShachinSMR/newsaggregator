@@ -1,63 +1,58 @@
-version: '3.8'
+version: "3.8"
+
 services:
-postgres:
-image: postgres:15
-environment:
-POSTGRES_USER: newsuser
-POSTGRES_PASSWORD: newspwd
-POSTGRES_DB: newsdb
-volumes:
-- pgdata:/var/lib/postgresql/data
-ports:
-- '5432:5432'
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: newsuser
+      POSTGRES_PASSWORD: newspwd
+      POSTGRES_DB: newsdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
 
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
 
-redis:
-image: redis:7
-ports:
-- '6379:6379'
+  gateway:
+    build: ./gateway
+    depends_on:
+      - analytics
+      - postgres
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
+      - ANALYTICS_URL=http://analytics:8083
 
+  fetcher:
+    build: ./fetcher
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
+      - REDIS_ADDR=redis:6379
 
-gateway:
-build: ./gateway
-depends_on:
-- analytics
-- postgres
-ports:
-- '8080:8080'
-environment:
-- DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
-- ANALYTICS_URL=http://analytics:8083
+  nlp:
+    build: ./nlp
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
+      - REDIS_ADDR=redis:6379
+      - HF_API_KEY=${HF_API_KEY}
 
-
-fetcher:
-build: ./fetcher
-depends_on:
-- postgres
-- redis
-environment:
-- DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
-- REDIS_ADDR=redis:6379
-
-
-nlp:
-build: ./nlp
-depends_on:
-- postgres
-- redis
-environment:
-  - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
-  - REDIS_ADDR=redis:6379
-  - HF_API_KEY=${HF_API_KEY}
-
-
-analytics:
-build: ./analytics
-depends_on:
-- postgres
-ports:
-- '8083:8083'
-
+  analytics:
+    build: ./analytics
+    depends_on:
+      - postgres
+    ports:
+      - "8083:8083"
 
 volumes:
-pgdata:
+  pgdata:
