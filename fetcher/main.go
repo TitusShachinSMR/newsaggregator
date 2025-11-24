@@ -1,53 +1,114 @@
 package main
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"os"
 	"time"
 
-	"context"
-
 	"github.com/go-redis/redis/v8"
-	_ "github.com/lib/pq"
+	"github.com/mmcdole/gofeed"
 )
-
 
 var ctx = context.Background()
 
+// List of RSS Feeds
+var rssFeeds = []string{
+	"https://feeds.bbci.co.uk/news/rss.xml",
+	"https://rss.cnn.com/rss/edition.rss",
+	"https://feeds.skynews.com/feeds/rss/home.xml",
+}
 
-func main(){
-dsn := os.Getenv("DB_DSN")
-if dsn=="" { dsn="postgres://newsuser:newspwd@localhost:5432/newsdb?sslmode=disable" }
-db, err := sql.Open("postgres", dsn)
-if err!=nil { log.Fatal(err) }
-defer db.Close()
+func main() {
 
+	// ------------------ CONNECT POSTGRES ------------------
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		dsn = "postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable"
+	}
 
-raddr := os.Getenv("REDIS_ADDR")
-if raddr=="" { raddr="localhost:6379" }
-rdb := redis.NewClient(&redis.Options{Addr:raddr})
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatal("Postgres connect error:", err)
+	}
+	defer db.Close()
 
+	// ------------------ CONNECT REDIS ------------------
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "redis:6379"
+	}
 
-// Simple placeholder article - replace with NewsAPI call
-title := "Starter: Example article " + time.Now().Format(time.RFC3339)
-content := "This is a sample content fetched by fetcher service."
-url := fmt.Sprintf("https://example.com/%d", time.Now().Unix())
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 
+	// ------------------ RSS PARSER ------------------
+	parser := gofeed.NewParser()
 
-var id int
-err = db.QueryRow(`INSERT INTO articles(source,title,content,url,published_at) VALUES($1,$2,$3,$4,$5) RETURNING id`, "example", title, content, url, time.Now()).Scan(&id)
-if err!=nil { log.Fatal(err) }
+	log.Println("Fetcher service (RSS) started...")
 
+	for {
+		for _, feedURL := range rssFeeds {
 
-// push to redis queue for NLP service
-err = rdb.RPush(ctx, "nlp:queue", id).Err()
-if err!=nil { log.Fatal(err) }
+			feed, err := parser.ParseURL(feedURL)
+			if err != nil {
+				log.Println("RSS error:", err)
+				continue
+			}
 
+			for _, item := range feed.Items {
 
-log.Printf("Inserted article id=%d and queued for NLP", id)
+				if item.Link == "" {
+					continue
+				}
 
+				// check duplicate by URL
+				var exists bool
+				err := db.QueryRow(
+					`SELECT EXISTS(SELECT 1 FROM articles WHERE url=$1)`,
+					item.Link,
+				).Scan(&exists)
 
-// For demo we exit. In production run periodically (ticker) or as cron.
+				if err != nil {
+					log.Println("Dup check error:", err)
+					continue
+				}
+
+				if exists {
+					continue // skip duplicates
+				}
+
+				// Insert article
+				var id int
+				err = db.QueryRow(`
+					INSERT INTO articles (source, title, content, url, published_at)
+					VALUES ($1, $2, $3, $4, $5)
+					RETURNING id
+				`,
+					feed.Title,
+					item.Title,
+					item.Content,
+					item.Link,
+					item.PublishedParsed,
+				).Scan(&id)
+
+				if err != nil {
+					log.Println("DB insert error:", err)
+					continue
+				}
+
+				// Push to Redis NLP queue
+				_, err = rdb.LPush(ctx, "nlp:queue", id).Result()
+				if err != nil {
+					log.Println("Redis push error:", err)
+					continue
+				}
+
+				log.Printf("Inserted & queued article id=%d (%s)\n", id, item.Title)
+			}
+		}
+
+		// poll RSS every 10 minutes
+		time.Sleep(10 * time.Minute)
+	}
 }

@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: newsdb
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     ports:
       - "5432:5432"
 
@@ -37,15 +38,32 @@ services:
       - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
       - REDIS_ADDR=redis:6379
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    entrypoint: >
+      sh -c "
+        ollama serve &
+        sleep 4 &&
+        ollama pull mistral &&
+        tail -f /dev/null
+      "
+
   nlp:
     build: ./nlp
     depends_on:
       - postgres
       - redis
+      - ollama
     environment:
       - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
       - REDIS_ADDR=redis:6379
-      - HF_API_KEY=${HF_API_KEY}
+      - OLLAMA_HOST=http://ollama:11434
 
   analytics:
     build: ./analytics
@@ -56,3 +74,4 @@ services:
 
 volumes:
   pgdata:
+  ollama:
