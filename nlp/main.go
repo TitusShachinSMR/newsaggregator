@@ -1,140 +1,138 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/hupe1980/go-huggingface"
 	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 var ctx = context.Background()
 
-// ------------------------
-// OLLAMA GENERATE REQUEST
-// ------------------------
+// ===============================================================
+// SUMMARY USING OFFICIAL HF Summarization API
+// ===============================================================
+func summarize(client *huggingface.InferenceClient, text string) (string, error) {
 
-type OllamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-}
-
-type OllamaResponse struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
-}
-
-func callOllama(model, prompt string) (string, error) {
-	host := os.Getenv("OLLAMA_HOST")
-	if host == "" {
-		host = "http://ollama:11434"
+	// Must wrap text inside []string
+	req := &huggingface.SummarizationRequest{
+		Inputs: []string{text},
+		Model:  "facebook/bart-large-cnn", // this is important
+		Parameters: huggingface.SummarizationParameters{
+			MinLength:        huggingface.PTR(30),
+			MaxLength:        huggingface.PTR(150),
+			Temperature:      huggingface.PTR(0.3),
+			RepetitionPenalty: huggingface.PTR(1.1),
+		},
 	}
 
-	url := host + "/api/generate"
-
-	body, _ := json.Marshal(OllamaRequest{
-		Model:  model,
-		Prompt: prompt,
-	})
-
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 90 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Summarization(ctx, req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
-
-	var parsed OllamaResponse
-	if err := json.Unmarshal(raw, &parsed); err == nil {
-		return strings.TrimSpace(parsed.Response), nil
+	if len(resp) == 0 {
+		return "", fmt.Errorf("empty summarization response")
 	}
 
-	return "", fmt.Errorf("ollama unexpected response: %s", string(raw))
+	return strings.TrimSpace(resp[0].SummaryText), nil
 }
 
-// ------------------------
-// SUMMARY
-// ------------------------
+// ===============================================================
+// SENTIMENT USING TextClassification API
+// ===============================================================
+func sentiment(client *huggingface.InferenceClient, text string) (float64, error) {
 
-func summarize(text string) (string, error) {
-	prompt := "Summarize this news article in 3–4 lines:\n\n" + text
-	return callOllama("mistral", prompt)
-}
+	req := &huggingface.TextClassificationRequest{
+		Inputs: text,
+		Model:  "distilbert-base-uncased-finetuned-sst-2-english",
+	}
 
-// ------------------------
-// SENTIMENT
-// ------------------------
-
-func sentiment(text string) (float64, error) {
-	prompt := `
-Classify sentiment of the text as:
-1 (positive)
-0 (neutral)
--1 (negative)
-
-Text:
-` + text
-
-	resp, err := callOllama("mistral", prompt)
+	resp, err := client.TextClassification(ctx, req)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sentiment error: %w", err)
 	}
 
-	resp = strings.ToLower(strings.TrimSpace(resp))
+	if len(resp) == 0 || len(resp[0]) == 0 {
+		return 0, fmt.Errorf("sentiment empty result")
+	}
 
-	switch resp {
-	case "1", "+1", "positive":
-		return 1, nil
-	case "-1", "- 1", "negative":
-		return -1, nil
+	item := resp[0][0]
+	label := strings.ToLower(item.Label)
+	score := float64(item.Score)
+
+	switch label {
+	case "positive":
+		return score, nil
+	case "negative":
+		return -score, nil
 	default:
-		return 0, nil
+		return 0, nil // neutral
 	}
 }
 
-// ------------------------
+// ===============================================================
 // MAIN WORKER LOOP
-// ------------------------
-
+// ===============================================================
 func main() {
+
+	// ---------------------- PostgreSQL ----------------------
 	dsn := os.Getenv("DB_DSN")
 	if dsn == "" {
-		dsn = "postgres://newsuser:newspwd@localhost:5432/newsdb?sslmode=disable"
+		dsn = "postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("DB open error:", err)
 	}
 	defer db.Close()
 
+	// Wait for Postgres
+	for {
+		if err := db.Ping(); err == nil {
+			break
+		}
+		log.Println("Waiting for Postgres...")
+		time.Sleep(2 * time.Second)
+	}
+
+	// ---------------------- Redis ---------------------------
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "redis:6379"
+	}
+
 	rdb := redis.NewClient(&redis.Options{
-		Addr: os.Getenv("REDIS_ADDR"),
+		Addr: redisAddr,
 	})
 
-	log.Println("NLP service (Ollama version) running...")
+	// ---------------------- HuggingFace Client ----------------
+	hfToken := os.Getenv("HF_API_KEY")
+	if hfToken == "" {
+		log.Fatal("ERROR: HF_API_KEY not set")
+	}
 
+	client := huggingface.NewInferenceClient(hfToken)
+
+	log.Println("NLP service (HuggingFace official SDK) ready...")
+
+	// ---------------------- Worker Loop ---------------------
 	for {
 		res, err := rdb.BLPop(ctx, 5*time.Second, "nlp:queue").Result()
 		if err == redis.Nil || len(res) < 2 {
 			continue
 		}
 		if err != nil {
-			log.Println("redis error:", err)
+			log.Println("Redis error:", err)
 			continue
 		}
 
@@ -143,32 +141,35 @@ func main() {
 		var content string
 		err = db.QueryRow(`SELECT content FROM articles WHERE id=$1`, articleID).Scan(&content)
 		if err != nil {
-			log.Println("db error:", err)
+			log.Println("DB read error:", err)
 			continue
 		}
 
-		summary, err := summarize(content)
+		// ------------------ Summary ------------------
+		summary, err := summarize(client, content)
 		if err != nil {
-			log.Println("summary error:", err)
+			log.Println("Summary error:", err)
 			continue
 		}
 
-		score, err := sentiment(content)
+		// ------------------ Sentiment -----------------
+		score, err := sentiment(client, content)
 		if err != nil {
-			log.Println("sentiment error:", err)
+			log.Println("Sentiment error:", err)
 			continue
 		}
 
+		// ------------------ Insert Output -------------
 		_, err = db.Exec(`
-            INSERT INTO nlp_results(article_id, summary, sentiment, keywords)
-            VALUES ($1, $2, $3, $4)`,
-			articleID, summary, score, pq.Array([]string{"news", "analysis"}))
+			INSERT INTO nlp_results(article_id, summary, sentiment, keywords)
+			VALUES ($1, $2, $3, $4)
+		`, articleID, summary, score, pq.Array([]string{"news", "analysis"}))
 
 		if err != nil {
-			log.Println("db insert error:", err)
+			log.Println("DB insert error:", err)
 			continue
 		}
 
-		log.Printf("Processed article %s (sentiment=%.1f)", articleID, score)
+		log.Printf("✔ Processed article %s (sentiment %.3f)\n", articleID, score)
 	}
 }

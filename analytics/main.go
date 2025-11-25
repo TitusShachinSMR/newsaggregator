@@ -23,9 +23,9 @@ func jsonResponse(w http.ResponseWriter, data interface{}) {
 func main() {
 
 	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://newsuser:newspwd@localhost:5432/newsdb?sslmode=disable"
-	}
+		if dsn == "" {
+    dsn = "postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable"
+}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

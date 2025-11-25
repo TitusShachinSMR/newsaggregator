@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	_ "github.com/lib/pq"
 	"github.com/mmcdole/gofeed"
 )
 
@@ -24,15 +25,24 @@ func main() {
 
 	// ------------------ CONNECT POSTGRES ------------------
 	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		dsn = "postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable"
-	}
+		if dsn == "" {
+    dsn = "postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable"
+}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatal("Postgres connect error:", err)
 	}
-	defer db.Close()
+    // Wait until Postgres is ready
+for {
+    err := db.Ping()
+    if err == nil {
+        log.Println("Connected to Postgres!")
+        break
+    }
+    log.Println("Postgres not ready, retrying in 2s...")
+    time.Sleep(2 * time.Second)
+}
 
 	// ------------------ CONNECT REDIS ------------------
 	redisAddr := os.Getenv("REDIS_ADDR")

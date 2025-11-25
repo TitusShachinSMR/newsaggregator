@@ -4,6 +4,7 @@ go 1.23.4
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/lib/pq v1.10.9
 	github.com/mmcdole/gofeed v1.3.0
 )
 

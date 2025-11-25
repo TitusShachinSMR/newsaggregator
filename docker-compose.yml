@@ -38,32 +38,15 @@ services:
       - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
       - REDIS_ADDR=redis:6379
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama:/root/.ollama
-    entrypoint: >
-      sh -c "
-        ollama serve &
-        sleep 4 &&
-        ollama pull mistral &&
-        tail -f /dev/null
-      "
-
   nlp:
     build: ./nlp
     depends_on:
       - postgres
       - redis
-      - ollama
     environment:
       - DB_DSN=postgres://newsuser:newspwd@postgres:5432/newsdb?sslmode=disable
       - REDIS_ADDR=redis:6379
-      - OLLAMA_HOST=http://ollama:11434
+      - HF_API_KEY=${HF_API_KEY} # <-- Correct way to pass key
 
   analytics:
     build: ./analytics
@@ -74,4 +57,3 @@ services:
 
 volumes:
   pgdata:
-  ollama:

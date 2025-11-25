@@ -78,14 +78,6 @@ func main() {
         proxyGET(c, url)
     })
 
-    // -------------------------------
-    // /news/recommend/:id → recommendations related to article
-    // -------------------------------
-    r.GET("/news/recommend/:id", func(c *gin.Context) {
-        id := c.Param("id")
-        url := analyticsURL + "/recommendations?id=" + id
-        proxyGET(c, url)
-    })
 
     r.Run(":8080")
 }
